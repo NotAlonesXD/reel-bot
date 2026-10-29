@@ -137,15 +137,21 @@ def make_ass(words, path, per=3):
             "[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,"
             "BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,"
             "Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n"
-            "Style: Default,DejaVu Sans,96,&H0000D7FF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,2,5,60,60,0,1\n\n"
+            "Style: Default,DejaVu Sans,96,&H0000D7FF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,3,5,60,60,0,1\n\n"
             "[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
+    pop = "{\\an5\\pos(540,1200)\\fscx82\\fscy82\\t(0,110,\\fscx108\\fscy108)\\t(110,200,\\fscx100\\fscy100)}"
     chunks = [words[i:i + per] for i in range(0, len(words), per)]
     lines = []
     for i, ch in enumerate(chunks):
         start = ch[0][1]
         end = chunks[i + 1][0][1] if i + 1 < len(chunks) else ch[-1][2] + 0.4
-        txt = " ".join(w[0] for w in ch).upper().replace("{", "").replace("}", "")
-        lines.append(f"Dialogue: 0,{ts(start)},{ts(end)},Default,,0,0,0,,{txt}")
+        parts = []
+        for j, w in enumerate(ch):
+            nxt = ch[j + 1][1] if j + 1 < len(ch) else end
+            cs = max(5, int((nxt - w[1]) * 100))
+            word = w[0].upper().replace("{", "").replace("}", "").replace("\\", "")
+            parts.append("{\\kf" + str(cs) + "}" + word + " ")
+        lines.append(f"Dialogue: 0,{ts(start)},{ts(end)},Default,,0,0,0,," + pop + "".join(parts).strip())
     pathlib.Path(path).write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -182,24 +188,89 @@ def fetch_clips(terms, need):
 
 
 # ---------- 5. assemble video (ffmpeg) ----------
+XFADES = ["fade", "slideleft", "slideright", "wipeleft", "circleopen", "zoomin", "fadeblack", "smoothleft"]
+D = 0.3  # transition length
+
+
+def seg_count(dur):
+    return max(5, math.ceil(dur / 3.5))
+
+
+def make_sfx(dur, n, seg):
+    """Whoosh on every cut + a low boom at the start (all synthesized, no copyright)."""
+    ff = ["ffmpeg", "-y", "-loglevel", "error"]
+    run(ff + ["-f", "lavfi", "-i", "anoisesrc=d=0.7:c=pink:a=0.6", "-af",
+              "highpass=f=200,lowpass=f=5000,afade=t=in:st=0:d=0.35,afade=t=out:st=0.35:d=0.35,volume=1.3",
+              str(TMP / "whoosh.wav")])
+    run(ff + ["-f", "lavfi", "-i", "sine=f=55:d=0.9", "-af", "afade=t=out:st=0.05:d=0.85,volume=2.5",
+              str(TMP / "boom.wav")])
+    cmd, flt, labels = list(ff), [], []
+    cmd += ["-i", str(TMP / "boom.wav")]
+    flt.append("[0:a]adelay=0|0[a0]")
+    labels.append("[a0]")
+    for k in range(1, n):
+        cmd += ["-i", str(TMP / "whoosh.wav")]
+        ms = max(0, int((k * seg - 0.25) * 1000))
+        flt.append(f"[{k}:a]adelay={ms}|{ms}[a{k}]")
+        labels.append(f"[a{k}]")
+    flt.append("".join(labels) + f"amix=inputs={n}:normalize=0:duration=longest,apad=whole_dur={dur:.2f}[o]")
+    run(cmd + ["-filter_complex", ";".join(flt), "-map", "[o]", "-t", f"{dur:.2f}", str(TMP / "sfx.wav")])
+
+
+def make_audio(voice, dur, n, seg):
+    make_sfx(dur, n, seg)
+    tracks = sorted((ROOT / "music").glob("*.mp3")) if (ROOT / "music").exists() else []
+    ff = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(pathlib.Path(voice).resolve()),
+          "-i", str(TMP / "sfx.wav")]
+    if tracks:
+        track = random.choice(tracks)
+        print("Music:", track.name)
+        ff += ["-stream_loop", "-1", "-i", str(track)]
+        mv = 0.35
+    else:
+        print("No music files found, using a soft synthesized background")
+        for f in (110, 164.81, 220, 277.18):
+            ff += ["-f", "lavfi", "-i", f"sine=f={f}:d={dur:.2f}"]
+        mv = 1.0
+    music = "[2:a]volume=%s" % mv if tracks else \
+        "[2:a][3:a][4:a][5:a]amix=inputs=4:normalize=0,lowpass=f=900,tremolo=f=0.15:d=0.6,volume=0.18"
+    flt = (f"[0:a]apad=whole_dur={dur:.2f},asplit=2[v1][v2];{music}[m0];"
+           f"[m0][v2]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=300[md];"
+           f"[v1][md][1:a]amix=inputs=3:duration=longest:normalize=0,"
+           f"afade=t=in:st=0:d=0.3,afade=t=out:st={dur - 0.5:.2f}:d=0.5[o]")
+    run(ff + ["-filter_complex", flt, "-map", "[o]", "-t", f"{dur:.2f}", str(TMP / "mix.wav")])
+
+
 def build_video(clips, audio, ass_name, dur, out):
-    n = max(4, math.ceil(dur / 5))
+    n = seg_count(dur)
     seg = dur / n
-    listing = []
+    L = seg + D
     for i in range(n):
+        d = 1 if i % 2 == 0 else -1
         src = clips[i % len(clips)]
-        o = TMP / f"seg{i}.mp4"
-        run(["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "-1", "-i", str(src), "-t", f"{seg:.2f}",
-             "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
-             "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p", str(o)])
-        listing.append(f"file '{o.resolve()}'")
-    (TMP / "list.txt").write_text("\n".join(listing))
-    run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", "list.txt",
-         "-i", str(pathlib.Path(audio).resolve()),
-         "-vf", f"eq=brightness=-0.10,ass={ass_name}", "-map", "0:v", "-map", "1:a",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "160k", "-t", f"{dur:.2f}", "-movflags", "+faststart",
-         str(pathlib.Path(out).resolve())], cwd=TMP)
+        vf = ("scale=1188:2112:force_original_aspect_ratio=increase,"
+              f"crop=1080:1920:x='(iw-1080)/2+({d})*160*(t/{L:.2f}-0.5)':y='(ih-1920)/2',fps=30,setsar=1")
+        run(["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "-1", "-i", str(src), "-t", f"{L:.2f}",
+             "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+             str(TMP / f"seg{i}.mp4")])
+    make_audio(audio, dur, n, seg)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    for i in range(n):
+        cmd += ["-i", str(TMP / f"seg{i}.mp4")]
+    cmd += ["-i", str(TMP / "mix.wav"),
+            "-f", "lavfi", "-i", f"color=c=0xFFD700:s=1080x14:r=30:d={dur:.2f}"]
+    flt, prev = [], "[0:v]"
+    for k in range(1, n):
+        tr = random.choice(XFADES)
+        flt.append(f"{prev}[{k}:v]xfade=transition={tr}:duration={D}:offset={k * seg:.3f}[x{k}]")
+        prev = f"[x{k}]"
+    flt.append(f"{prev}eq=contrast=1.08:saturation=1.15:brightness=-0.07,vignette=PI/5,{'ass=' + ass_name}[g]")
+    flt.append(f"[g][{n + 1}:v]overlay=x='-overlay_w+overlay_w*t/{dur:.2f}':y=1750[o2]")
+    flt.append(f"[o2]fade=t=in:st=0:d=0.3,fade=t=out:st={dur - 0.4:.2f}:d=0.4[vout]")
+    cmd += ["-filter_complex", ";".join(flt), "-map", "[vout]", "-map", f"{n}:a", "-t", f"{dur:.2f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(pathlib.Path(out).resolve())]
+    run(cmd, cwd=TMP)
 
 
 def make():
@@ -211,7 +282,7 @@ def make():
     words = tts(narration, TMP / "voice.mp3")
     make_ass(words, TMP / "captions.ass")
     dur = words[-1][2] + 0.8
-    clips = fetch_clips(data["search_terms"], max(4, math.ceil(dur / 5)))
+    clips = fetch_clips(data["search_terms"], min(seg_count(dur), 10))
     name = time.strftime("%Y%m%d-%H%M%S") + ".mp4"
     build_video(clips, TMP / "voice.mp3", "captions.ass", dur, VIDEOS / name)
     tags = " ".join("#" + t.lstrip("#").replace(" ", "") for t in data["hashtags"])
@@ -286,4 +357,4 @@ def post():
 
 if __name__ == "__main__":
     {"make": make, "post": post}[sys.argv[1]]()
-                         
+            
