@@ -14,6 +14,7 @@ PIXABAY_KEY = os.environ.get("PIXABAY_API_KEY", "")
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 VOICE = os.environ.get("VOICE", "en-US-AndrewNeural")
 GV = os.environ.get("GRAPH_VERSION", "v23.0")
+FB_GV = os.environ.get("FB_GRAPH_VERSION", "v25.0")
 DRY = os.environ.get("DRY_RUN", "0") == "1"
 
 CATEGORIES = ["space", "the human body", "world history", "psychology", "animals",
@@ -330,8 +331,13 @@ def post():
         if requests.head(url, timeout=20).status_code == 200:
             break
         time.sleep(10)
-    tok = refresh_token(os.environ["IG_ACCESS_TOKEN"])
-    base = f"https://graph.instagram.com/{GV}"
+
+    page_tok = os.environ.get("IG_PAGE_TOKEN", "").strip()
+    if page_tok:   # Facebook Page route (Page access token, does not expire)
+        tok, base = page_tok, f"https://graph.facebook.com/{FB_GV}"
+    else:          # Instagram Login route (token refreshed each run)
+        tok = refresh_token(os.environ["IG_ACCESS_TOKEN"])
+        base = f"https://graph.instagram.com/{GV}"
 
     def call(method, path, **kw):
         r = requests.request(method, f"{base}/{path}", timeout=60, **kw)
@@ -339,8 +345,15 @@ def post():
             sys.exit(f"Instagram error {r.status_code}: {r.text[:400]}")
         return r.json()
 
-    me = call("GET", "me", params={"fields": "user_id,username", "access_token": tok})
-    uid = me.get("user_id") or me["id"]
+    if page_tok:
+        me = call("GET", "me", params={"fields": "id,name,instagram_business_account", "access_token": tok})
+        if not me.get("instagram_business_account"):
+            sys.exit("This Page has no Instagram account linked to it")
+        uid = me["instagram_business_account"]["id"]
+        print("Posting to Instagram account linked to Page:", me.get("name"))
+    else:
+        me = call("GET", "me", params={"fields": "user_id,username", "access_token": tok})
+        uid = me.get("user_id") or me["id"]
     cid = call("POST", f"{uid}/media", data={"media_type": "REELS", "video_url": url, "share_to_feed": "true",
                                               "caption": meta["caption"], "access_token": tok})["id"]
     for _ in range(40):
@@ -357,4 +370,4 @@ def post():
 
 if __name__ == "__main__":
     {"make": make, "post": post}[sys.argv[1]]()
-            
+                        
