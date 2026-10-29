@@ -1,3 +1,4 @@
 requests
 edge-tts>=7.0.0
 pynacl
+piper-tts
