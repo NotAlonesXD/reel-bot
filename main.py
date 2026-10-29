@@ -41,7 +41,7 @@ caption (1-2 sentences ending with a question),
 hashtags (list of 5 without the # sign),
 search_terms (list of 4 simple English words for stock footage that fits the topic)."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    r = requests.post(url, params={"key": GEMINI_KEY}, timeout=90, json={
+    r = requests.post(url, params={"key": GEMINI_KEY}, timeout=600, json={
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 1.0}})
     if not r.ok:
