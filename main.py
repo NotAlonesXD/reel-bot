@@ -31,7 +31,7 @@ def make_script():
     cat = random.choice(CATEGORIES)
     prompt = f"""You write 30-40 second narrated Instagram Reels for a facts page called "Facts Nobody Told You".
 Category today: {cat}.
-  Pick ONE fresh, surprising topic. Do NOT repeat or resemble these past topics: {hist[-80:]}
+Pick ONE fresh, surprising topic. Do NOT repeat or resemble these past topics: {hist[-80:]}
 Rules: use only well-established, verifiable facts. No exaggeration, no invented numbers, no myths presented as fact.
 Return JSON with exactly these keys:
 topic (short string), hook (max 10 words, curiosity-driven opening line),
@@ -41,9 +41,16 @@ caption (1-2 sentences ending with a question),
 hashtags (list of 5 without the # sign),
 search_terms (list of 4 simple English words for stock footage that fits the topic)."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    r = requests.post(url, params={"key": GEMINI_KEY}, timeout=600, json={
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 1.0}})
+    for attempt in range(3):
+        try:
+            r = requests.post(url, params={"key": GEMINI_KEY}, timeout=900, json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 1.0}})
+            break
+        except requests.exceptions.Timeout:
+            print("Gemini timed out, retrying...")
+    else:
+        sys.exit("Gemini kept timing out")
     if not r.ok:
         sys.exit(f"Gemini error {r.status_code}: {r.text[:300]}")
     text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -51,10 +58,10 @@ search_terms (list of 4 simple English words for stock footage that fits the top
     return json.loads(text)
 
 
-# ---------- 2. voice + word timings (edge-tts) ----------
-async def tts(text, path):
+# ---------- 2. voice + word timings ----------
+async def tts_edge(text, path, voice):
     import edge_tts
-    com = edge_tts.Communicate(text, VOICE, boundary="WordBoundary")
+    com = edge_tts.Communicate(text, voice, boundary="WordBoundary")
     words = []
     with open(path, "wb") as f:
         async for ch in com.stream():
@@ -64,8 +71,50 @@ async def tts(text, path):
                 s = ch["offset"] / 1e7
                 words.append((ch["text"], s, s + ch["duration"] / 1e7))
     if not words:
-        sys.exit("Voice generation returned no words")
+        raise RuntimeError("no words returned")
     return words
+
+
+def estimate_words(text, dur):
+    """Spread the words over the audio length (used when the voice gives no timings)."""
+    ws = text.split()
+    total = sum(len(w) + 2 for w in ws)
+    t, out, span = 0.2, [], max(dur - 0.6, 1)
+    for w in ws:
+        d = span * (len(w) + 2) / total
+        out.append((w, t, t + d))
+        t += d
+    return out
+
+
+PIPER_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium"
+
+
+def tts_piper(text, path):
+    for ext in (".onnx", ".onnx.json"):
+        with requests.get(PIPER_URL + ext, stream=True, timeout=120) as r:
+            r.raise_for_status()
+            with open(TMP / f"piper{ext}", "wb") as f:
+                for b in r.iter_content(1 << 16):
+                    f.write(b)
+    wav = TMP / "voice.wav"
+    run([sys.executable, "-m", "piper", "-m", str(TMP / "piper.onnx"), "-f", str(wav)], input=text.encode())
+    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-ar", "44100", str(path)])
+    dur = float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                         "-of", "csv=p=0", str(path)]).decode().strip())
+    return estimate_words(text, dur)
+
+
+def tts(text, path):
+    for voice in (VOICE, "en-US-GuyNeural", "en-GB-RyanNeural"):
+        for _ in range(2):
+            try:
+                return asyncio.run(tts_edge(text, path, voice))
+            except Exception as e:
+                print(f"edge-tts failed with {voice}: {type(e).__name__}")
+                time.sleep(3)
+    print("Switching to backup voice (Piper)")
+    return tts_piper(text, path)
 
 
 # ---------- 3. captions (ASS file) ----------
@@ -149,7 +198,7 @@ def make():
     data = make_script()
     narration = " ".join([data["hook"]] + data["facts"] + [data["outro"]])
     print("TOPIC:", data["topic"], "\n", narration)
-    words = asyncio.run(tts(narration, TMP / "voice.mp3"))
+    words = tts(narration, TMP / "voice.mp3")
     make_ass(words, TMP / "captions.ass")
     dur = words[-1][2] + 0.8
     clips = fetch_clips(data["search_terms"], max(4, math.ceil(dur / 5)))
@@ -227,3 +276,4 @@ def post():
 
 if __name__ == "__main__":
     {"make": make, "post": post}[sys.argv[1]]()
+            
