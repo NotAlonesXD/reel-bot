@@ -11,7 +11,7 @@ HISTORY, META = ROOT / "history.json", TMP / "meta.json"
 
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 PIXABAY_KEY = os.environ.get("PIXABAY_API_KEY", "")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 VOICE = os.environ.get("VOICE", "en-US-AndrewNeural")
 GV = os.environ.get("GRAPH_VERSION", "v23.0")
 DRY = os.environ.get("DRY_RUN", "0") == "1"
