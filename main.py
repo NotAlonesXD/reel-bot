@@ -40,19 +40,29 @@ outro (one short line asking viewers to follow or save),
 caption (1-2 sentences ending with a question),
 hashtags (list of 5 without the # sign),
 search_terms (list of 4 simple English words for stock footage that fits the topic)."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    for attempt in range(3):
-        try:
-            r = requests.post(url, params={"key": GEMINI_KEY}, timeout=900, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json", "temperature": 1.0}})
+    r = None
+    for model in dict.fromkeys([MODEL, "gemini-flash-latest"]):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        for attempt in range(1, 6):
+            try:
+                r = requests.post(url, params={"key": GEMINI_KEY}, timeout=900, json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"responseMimeType": "application/json", "temperature": 1.0}})
+            except requests.exceptions.Timeout:
+                print(f"Gemini ({model}) timed out, try {attempt}/5")
+                time.sleep(20)
+                continue
+            if r.ok:
+                break
+            print(f"Gemini ({model}) error {r.status_code}, try {attempt}/5")
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(30 * attempt)   # busy server: wait and try again
+                continue
+            break                          # other errors: try the next model
+        if r is not None and r.ok:
             break
-        except requests.exceptions.Timeout:
-            print("Gemini timed out, retrying...")
-    else:
-        sys.exit("Gemini kept timing out")
-    if not r.ok:
-        sys.exit(f"Gemini error {r.status_code}: {r.text[:300]}")
+    if r is None or not r.ok:
+        sys.exit(f"Gemini failed: {r.status_code if r is not None else 'no answer'} {r.text[:300] if r is not None else ''}")
     text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(text)
@@ -276,4 +286,4 @@ def post():
 
 if __name__ == "__main__":
     {"make": make, "post": post}[sys.argv[1]]()
-            
+                         
